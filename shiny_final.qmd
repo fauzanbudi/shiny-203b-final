@@ -1,0 +1,133 @@
+---
+title: "My Shiny Final"
+format: html
+server: shiny
+---
+
+library(shiny)
+library(shinydashboard)
+library(bigrquery)
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(DT)
+
+# --- 1. Authentication & Connection ---
+# If you are running locally, provide the path to your JSON key here:
+# bq_auth(path = "path/to/your/service-account-key.json")
+
+# If you have already authenticated via gcloud in your terminal, 
+# bigrquery will often find your credentials automatically.
+
+con <- dbConnect(
+  bigrquery::bigquery(),
+  project = "physionet-data-486705",
+  dataset = "fauzan_staging",
+  billing = "physionet-data-486705" # Charges go to this project
+)
+
+# --- 2. Data Loading ---
+# Loading a sample to ensure the dashboard remains responsive
+query <- "SELECT * EXCEPT(text) FROM `physionet-data-486705.fauzan_staging.cohort_multiple`"
+df <- dbGetQuery(con, query)
+
+# Pre-processing column types for the UI
+numeric_cols <- names(df)[sapply(df, is.numeric)]
+all_cols <- names(df)
+
+# --- 3. UI Definition ---
+ui <- dashboardPage(
+  skin = "blue",
+  dashboardHeader(title = "Physionet Cohort Explorer"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Data Table", tabName = "tab_table", icon = icon("table")),
+      menuItem("Summary Stats", tabName = "tab_summary", icon = icon("chart-bar")),
+      menuItem("Correlations", tabName = "tab_corr", icon = icon("project-diagram"))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      # Tab 1: Data Table
+      tabItem(tabName = "tab_table",
+              fluidRow(
+                box(title = "Cohort Table (Filtered)", width = 12, 
+                    DTOutput("main_table"))
+              )
+      ),
+      
+      # Tab 2: Summary Stats
+      tabItem(tabName = "tab_summary",
+              fluidRow(
+                box(width = 4, title = "Select Variable",
+                    selectInput("var_select", "Variable:", choices = all_cols),
+                    hr(),
+                    verbatimTextOutput("summary_text")
+                ),
+                box(width = 8, title = "Distribution",
+                    plotOutput("summary_plot"))
+              )
+      ),
+      
+      # Tab 3: Correlation
+      tabItem(tabName = "tab_corr",
+              fluidRow(
+                box(width = 4, title = "Compare Variables",
+                    selectInput("var_x", "X Axis:", choices = all_cols, selected = "age"),
+                    selectInput("var_y", "Y Axis:", choices = all_cols, selected = "los_days")
+                ),
+                box(width = 8, title = "Visualization",
+                    plotOutput("corr_plot"))
+              )
+      )
+    )
+  )
+)
+
+# --- 4. Server Logic ---
+server <- function(input, output) {
+  
+  # Render searchable table
+  output$main_table <- renderDT({
+    datatable(df, filter = 'top', options = list(pageLength = 10, scrollX = TRUE))
+  })
+  
+  # Summary text output
+  output$summary_text <- renderPrint({
+    summary(df[[input$var_select]])
+  })
+  
+  # Summary plot output
+  output$summary_plot <- renderPlot({
+    p <- ggplot(df, aes_string(x = input$var_select))
+    if (input$var_select %in% numeric_cols) {
+      p + geom_histogram(fill = "#3c8dbc", color = "white", bins = 30) + theme_minimal()
+    } else {
+      p + geom_bar(fill = "#00a65a") + theme_minimal() + 
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    }
+  })
+  
+  # Correlation plot logic (Auto-detects Plot Type)
+  output$corr_plot <- renderPlot({
+    is_x_num <- is.numeric(df[[input$var_x]])
+    is_y_num <- is.numeric(df[[input$var_y]])
+    
+    p <- ggplot(df, aes_string(x = input$var_x, y = input$var_y))
+    
+    if (is_x_num && is_y_num) {
+      p + geom_point(alpha = 0.4, color = "blue") + geom_smooth(method = "lm") + theme_minimal()
+    } else if (!is_x_num && is_y_num) {
+      p + geom_boxplot(fill = "orange") + theme_minimal() + 
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    } else {
+      # Heatmap for categorical vs categorical
+      df %>%
+        count(.data[[input$var_x]], .data[[input$var_y]]) %>%
+        ggplot(aes_string(x = input$var_x, y = input$var_y, fill = "n")) +
+        geom_tile() + scale_fill_viridis_c() + theme_minimal()
+    }
+  })
+}
+
+shinyApp(ui, server)
